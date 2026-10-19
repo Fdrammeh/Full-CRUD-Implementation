@@ -1,17 +1,24 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from app.database import SessionLocal
+from app.database import get_db
 from app.models.student import Student
 from app.schemas.student import (StudentCreate, StudentUpdate, StudentPatch, StudentResponse)
 from typing import Optional
+from fastapi import Response, status
 
 router = APIRouter(prefix="/students", tags=["Students"])
 
+def get_student_or_404(student_id: int, db: Session) -> Student:
+    """Return a student or raise a 404 error."""
+    student = db.query(Student).filter(Student.id == student_id).first()
 
-def get_db(): 
-    db = SessionLocal() 
-    try: yield db 
-    finally: db.close()
+    if student is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Student not found"
+        )
+
+    return student
 
 #POST /students - creating a student
 @router.post("/", response_model=StudentResponse, status_code=201) 
@@ -31,7 +38,11 @@ def create_student(student: StudentCreate, db: Session = Depends(get_db)):
         name=student.name, 
         email=student.email, 
         major=student.major, 
-        gpa=student.gpa, )
+        gpa=student.gpa, 
+        grade_level = student.grade_level,
+        is_enrolled = student.is_enrolled,
+    )
+
 
     db.add(new_student) 
     db.commit() 
@@ -53,21 +64,15 @@ def get_students(
 
     if major is not None: 
         query = query.filter(Student.major == major) 
-        if min_gpa is not None: query = query.filter(Student.gpa >= min_gpa) 
-        return query.all()
+    if min_gpa is not None: query = query.filter(Student.gpa >= min_gpa) 
+    return query.all()
 
 # 3. GET /students/{id} - Get one student
 @router.get("/{student_id}", response_model=StudentResponse) 
 
 def get_student(student_id: int, db: Session = Depends(get_db)): 
-    student = ( 
-        db.query(Student) 
-        .filter(Student.id == student_id) 
-        .first() ) 
-
-    if student is None: 
-        raise HTTPException( status_code=404, detail="Student not found.", ) 
-    return student 
+    student = get_student_or_404(student_id, db)
+    return student
 
 # 4. PUT /students/{id} - Full replacement
 @router.put("/{student_id}", response_model=StudentResponse) 
@@ -76,15 +81,7 @@ def update_student(
     student_data:StudentUpdate, 
     db: Session = Depends(get_db), ): 
 
-    student = (db.query(Student) 
-               .filter(Student.id == student_id) 
-               .first() )
-
-
-    if student is None: 
-        raise HTTPException( 
-            status_code=404, 
-            detail="Student not found.", ) 
+    student = get_student_or_404(student_id, db)
 
 # Check whether the new email belongs to another student
     existing_student = ( 
@@ -108,69 +105,61 @@ def update_student(
 
 
 #PATCH /students/{id} - Partial update 
-@router.patch("/{student_id}", response_model=StudentResponse) 
-def patch_student( 
-    student_id: int, 
-    student_data: StudentPatch, 
-    db: Session = Depends(get_db), 
-): 
 
-    student = ( 
-        db.query(Student) 
-        .filter(Student.id == student_id) 
-        .first() ) 
+@router.patch("/{student_id}", response_model=StudentResponse)
+def patch_student(
+    student_id: int,
+    student_data: StudentPatch,
+    db: Session = Depends(get_db),
+):
+    # Find the student or return a 404 error
+    student = get_student_or_404(student_id, db)
 
-    if student is None: 
-        raise HTTPException( 
-            status_code=404, 
-            detail="Student not found.", ) 
+    # Get only the fields the client provided
+    updates = student_data.model_dump(exclude_unset=True)
 
-    updates = student_data.model_dump(exclude_unset=True) 
-
-
-#Check for duplicate email if email is being changed
-    if "email" in updates: 
+    # Check for duplicate email if email is being changed
+    if "email" in updates:
         existing_student = (
-            db.query(Student) 
-            .filter( 
-                Student.email == updates["email"], Student.id != student_id, 
-            ) 
-        .first() ) 
-
-        if existing_student: 
-            raise HTTPException( 
-                status_code=409, 
-                detail="A student with this email already exists.", ) 
-
-        for field, value in updates.items():        
-            setattr(student, field, value) 
-
-        db.commit() 
-        db.refresh(student) 
-        return student
-
-# 6. DELETE /students/{id} - Delete a student
-@router.delete("/{student_id}") 
-def delete_student( 
-    student_id: int, 
-    db: Session = Depends(get_db), ):
-
-    student =(
-        db.query(Student)
-        .filter(Student.id == student_id)
-        .first()
-
-    )
-
-    if student is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Student not found.",
+            db.query(Student)
+            .filter(
+                Student.email == updates["email"],
+                Student.id != student_id,
+            )
+            .first()
         )
 
+        if existing_student:
+            raise HTTPException(
+                status_code=409,
+                detail="A student with this email already exists.",
+            )
+
+    # Apply every provided update, not just email updates
+    for field, value in updates.items():
+        setattr(student, field, value)
+
+    db.commit()
+    db.refresh(student)
+
+    return student
+
+
+# 6. DELETE /students/{id} - Delete a student
+@router.delete(
+    "/{student_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+def delete_student(
+    student_id: int,
+    db: Session = Depends(get_db),
+):
+    # Find the student or raise a 404 error
+    student = get_student_or_404(student_id, db)
+
+    # Delete the student
     db.delete(student)
     db.commit()
 
-    return {
-        "message": "Student deleted successfully"
-    }
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
